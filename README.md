@@ -1,5 +1,3 @@
-![logo-design](https://github.com/zzztzzzt/Achernar.jl/blob/main/logo/design.webp)
-
 # Achernar.jl
 
 [![GitHub last commit](https://img.shields.io/github/last-commit/zzztzzzt/Achernar.jl.svg)](https://github.com/zzztzzzt/Achernar.jl)
