@@ -1,4 +1,4 @@
-# Achernar.jl
+# Achernar
 
 [![GitHub last commit](https://img.shields.io/github/last-commit/zzztzzzt/Achernar.jl.svg)](https://github.com/zzztzzzt/Achernar.jl)
 [![GitHub repo size](https://img.shields.io/github/repo-size/zzztzzzt/Achernar.jl.svg)](https://github.com/zzztzzzt/Achernar.jl)

@@ -1,41 +1,54 @@
+using System.Net.WebSockets;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using AchernarCs;
+
 var builder = WebApplication.CreateBuilder(args);
-
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
-
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+app.UseWebSockets();
+
+app.Map("/metaballs", async context =>
 {
-    app.MapOpenApi();
-}
+    if (context.WebSockets.IsWebSocketRequest)
+    {
+        using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+        var simulator = new MetaballsGpuSimulator();
+        var cancellationToken = context.RequestAborted;
 
-app.UseHttpsRedirection();
+        try
+        {
+            var targetFrameTicks = TimeSpan.FromSeconds(MetaballsGpuSimulator.FrameInterval).Ticks;
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+            while (webSocket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+            {
+                var frameStartTicks = stopwatch.ElapsedTicks;
+                var elapsedTotal = stopwatch.Elapsed.TotalSeconds;
 
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+                var payloadBytes = simulator.GenerateNextFramePayload(elapsedTotal);
+                await webSocket.SendAsync(payloadBytes, WebSocketMessageType.Binary, true, cancellationToken);
 
-app.Run();
+                var frameElapsedTicks = stopwatch.ElapsedTicks - frameStartTicks;
+                var remainingTicks = targetFrameTicks - frameElapsedTicks;
 
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
+                if (remainingTicks > 0)
+                {
+                    var sleepMs = (int)(remainingTicks * 1000 / System.Diagnostics.Stopwatch.Frequency);
+                    if (sleepMs > 0)
+                    {
+                        await Task.Delay(sleepMs, cancellationToken);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException) { }
+    }
+    else
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+    }
+});
+
+app.Run("http://localhost:8080");
