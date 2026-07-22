@@ -7,14 +7,14 @@ using StaticArrays
 export FRAME_INTERVAL
 export FIELD_BUFFER, VERTEX_BUFFER, NORMAL_BUFFER, PAYLOAD_BUFFER
 export update_physics!, compute_field!, build_mesh!, build_payload!
-export init!
+export init!, get_native_generator
 
 # Constants
 const BALL_COUNT = 12
 const FRAME_INTERVAL = 1 / 30
 const SPEED_LIMIT = 0.008f0
 
-const GRID_RESOLUTION = 108
+const GRID_RESOLUTION = 132
 const GRID_SIZE = GRID_RESOLUTION * GRID_RESOLUTION * GRID_RESOLUTION
 const CUBE_COUNT = (GRID_RESOLUTION - 1) * (GRID_RESOLUTION - 1) * (GRID_RESOLUTION - 1)
 const MAX_TRIANGLES = CUBE_COUNT * 5
@@ -29,6 +29,33 @@ const _BUF_BLOB_DATA = 12
 const _BUF_PARAMS = 13
 const _PIPELINE_ID = 10
 const _WORKGROUP_SIZE = (8, 8, 4)
+
+# Native Context for Zero-Julia-VM Streaming
+mutable struct NativeContext
+    start_time_sec::Float64
+    bx::Ptr{Float32}
+    by::Ptr{Float32}
+    bz::Ptr{Float32}
+    bvx::Ptr{Float32}
+    bvy::Ptr{Float32}
+    bvz::Ptr{Float32}
+    bsize::Ptr{Float32}
+    bc::Int32
+    speed_limit::Float32
+    field::Ptr{Float32}
+    axis::Ptr{Float32}
+    res::Int32
+    v_out::Ptr{Float32}
+    n_out::Ptr{Float32}
+    payload::Ptr{Float32}
+    blob_data_buf::Ptr{Float32}
+    isolevel::Float32
+    sub::Float32
+    eps::Float32
+    buf_field_id::Csize_t
+    buf_blob_data_id::Csize_t
+    pipeline_id::Csize_t
+end
 
 # SoA Pre-allocated Storage
 const BLOB_X = Vector{Float32}(undef, BALL_COUNT)
@@ -255,6 +282,277 @@ end
     """
 end
 
+@AX.rust_code """
+#[repr(C)]
+pub struct NativeContext {
+    pub start_time_sec: f64,
+    pub bx: *mut f32,
+    pub by: *mut f32,
+    pub bz: *mut f32,
+    pub bvx: *mut f32,
+    pub bvy: *mut f32,
+    pub bvz: *mut f32,
+    pub bsize: *mut f32,
+    pub bc: i32,
+    pub speed_limit: f32,
+    pub field: *mut f32,
+    pub axis: *mut f32,
+    pub res: i32,
+    pub v_out: *mut f32,
+    pub n_out: *mut f32,
+    pub payload: *mut f32,
+    pub blob_data_buf: *mut f32,
+    pub isolevel: f32,
+    pub sub: f32,
+    pub eps: f32,
+    pub buf_field_id: usize,
+    pub buf_blob_data_id: usize,
+    pub pipeline_id: usize,
+}
+"""
+
+@AX.rust_code """
+use std::sync::atomic::{AtomicUsize, Ordering};
+static FRAME_COUNT: AtomicUsize = AtomicUsize::new(0);
+"""
+
+@AX.rust_fn function _metaballs_native_frame(ctx::Ptr{Cvoid}, out_len::Ptr{Csize_t})::Ptr{UInt8}
+    """
+    let _count = FRAME_COUNT.fetch_add(1, Ordering::Relaxed);
+    
+    let ctx = unsafe { &mut *(ctx as *mut NativeContext) };
+    
+    // Calculate elapsed time using std::time
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    
+    if ctx.start_time_sec == 0.0 {
+        ctx.start_time_sec = now;
+    }
+    let elapsed_total = now - ctx.start_time_sec;
+    
+    let is_gravity_on = if (elapsed_total % 10.0) < 5.0 { 1 } else { 0 };
+    
+    // 1. Update Physics
+    unsafe {
+        rust_update_physics_impl(
+            ctx.bx, ctx.by, ctx.bz,
+            ctx.bvx, ctx.bvy, ctx.bvz,
+            ctx.bsize, ctx.bc, is_gravity_on, ctx.speed_limit
+        );
+    }
+    
+    // 2. Pack Blobs
+    unsafe {
+        rust_pack_blobs_impl(ctx.bx, ctx.by, ctx.bz, ctx.bsize, ctx.bc, ctx.blob_data_buf);
+    }
+    
+    // 3. Write Buffer
+    let blob_bytes = (ctx.bc as usize) * 4 * 4;
+    let write_result = crate::wgpu_core::write_buffer(ctx.buf_blob_data_id, ctx.blob_data_buf as *const u8, blob_bytes);
+    if write_result != 0 {
+        eprintln!("[MB] write_buffer error: {}", write_result);
+    }
+    
+    // 4. Dispatch Compute
+    let wg_x = (ctx.res as f32 / 8.0).ceil() as u32;
+    let wg_y = (ctx.res as f32 / 8.0).ceil() as u32;
+    let wg_z = (ctx.res as f32 / 4.0).ceil() as u32;
+    let dispatch_result = crate::wgpu_core::dispatch(ctx.pipeline_id, wg_x, wg_y, wg_z);
+    if dispatch_result != 0 {
+        eprintln!("[MB] dispatch error: {}", dispatch_result);
+    }
+    
+    // 5. Read Buffer
+    let field_bytes = (ctx.res as usize) * (ctx.res as usize) * (ctx.res as usize) * 4;
+    let read_result = crate::wgpu_core::read_buffer(ctx.buf_field_id, ctx.field as *mut u8, field_bytes);
+    if read_result != 0 {
+        eprintln!("[MB] read_buffer error: {}", read_result);
+    }
+    
+    // 6. Build Mesh
+    let vc = unsafe {
+        rust_build_mesh_impl(
+            ctx.v_out, ctx.n_out, ctx.field, ctx.axis, ctx.res,
+            ctx.bx, ctx.by, ctx.bz, ctx.bsize, ctx.bc,
+            ctx.isolevel, ctx.sub, ctx.eps
+        )
+    };
+    
+    // 7. Build Payload
+    unsafe {
+        rust_build_payload_impl(ctx.v_out, ctx.n_out, vc, ctx.payload);
+        
+        // Return results
+        *out_len = 4 + (vc as usize) * 8;
+        ctx.payload as *mut u8
+    }
+    """
+end
+
+# We need to extract the inner logic of those rust functions to be callable from within Rust natively.
+@AX.rust_code """
+#[inline(always)]
+unsafe fn rust_update_physics_impl(
+    bx: *mut f32, by: *mut f32, bz: *mut f32,
+    bvx: *mut f32, bvy: *mut f32, bvz: *mut f32,
+    _bsize: *mut f32, bc: i32, is_gravity: i32, speed_limit: f32
+) {
+    let bc = bc as usize;
+    let is_gravity_on = is_gravity == 1;
+
+    unsafe {
+        let bx = std::slice::from_raw_parts_mut(bx, bc);
+        let by = std::slice::from_raw_parts_mut(by, bc);
+        let bz = std::slice::from_raw_parts_mut(bz, bc);
+        let bvx = std::slice::from_raw_parts_mut(bvx, bc);
+        let bvy = std::slice::from_raw_parts_mut(bvy, bc);
+        let bvz = std::slice::from_raw_parts_mut(bvz, bc);
+
+        for i in 0..bc {
+            bx[i] += bvx[i]; by[i] += bvy[i]; bz[i] += bvz[i];
+            for j in 0..bc {
+                if i == j { continue; }
+                let dx = bx[j] - bx[i]; let dy = by[j] - by[i]; let dz = bz[j] - bz[i];
+                let dist_sq = dx*dx + dy*dy + dz*dz + 0.01;
+                let force = if is_gravity_on { 0.000008 } else { -0.00002 } / dist_sq;
+                bvx[i] += dx * force; bvy[i] += dy * force; bvz[i] += dz * force;
+            }
+            let margin = 0.15;
+            if bx[i] < margin { bvx[i] += 0.001; } else if bx[i] > 1.0 - margin { bvx[i] -= 0.001; }
+            if by[i] < margin { bvy[i] += 0.001; } else if by[i] > 1.0 - margin { bvy[i] -= 0.001; }
+            if bz[i] < margin { bvz[i] += 0.001; } else if bz[i] > 1.0 - margin { bvz[i] -= 0.001; }
+            
+            bvx[i] = (bvx[i] * 0.98).clamp(-speed_limit, speed_limit);
+            bvy[i] = (bvy[i] * 0.98).clamp(-speed_limit, speed_limit);
+            bvz[i] = (bvz[i] * 0.98).clamp(-speed_limit, speed_limit);
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn rust_pack_blobs_impl(
+    bx: *const f32, by: *const f32, bz: *const f32, bsize: *const f32,
+    bc: i32, dest: *mut f32
+) {
+    let bc = bc as usize;
+    unsafe {
+        let bx = std::slice::from_raw_parts(bx, bc);
+        let by = std::slice::from_raw_parts(by, bc);
+        let bz = std::slice::from_raw_parts(bz, bc);
+        let bsize = std::slice::from_raw_parts(bsize, bc);
+        let dest = std::slice::from_raw_parts_mut(dest, bc * 4);
+        for i in 0..bc {
+            let b = i * 4;
+            dest[b] = bx[i];
+            dest[b + 1] = by[i];
+            dest[b + 2] = bz[i];
+            dest[b + 3] = bsize[i];
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn rust_build_mesh_impl(
+    v_out: *mut f32, n_out: *mut f32, field: *const f32, axis: *const f32, res: i32,
+    bx: *const f32, by: *const f32, bz: *const f32, bsize: *const f32, bc: i32,
+    isolevel: f32, sub: f32, eps: f32
+) -> i32 {
+    let res = res as usize;
+    let bc = bc as usize;
+    
+    let mut o = 0;
+    let mut ex = [0.0f32; 12]; let mut ey = [0.0f32; 12]; let mut ez = [0.0f32; 12];
+    let mut enx = [0.0f32; 12]; let mut eny = [0.0f32; 12]; let mut enz = [0.0f32; 12];
+
+    let grid_index = |x: usize, y: usize, z: usize| -> usize { x + y * res + z * res * res };
+
+    unsafe {
+        let field = std::slice::from_raw_parts(field, res * res * res);
+        let axis = std::slice::from_raw_parts(axis, res);
+        let bx = std::slice::from_raw_parts(bx, bc);
+        let by = std::slice::from_raw_parts(by, bc);
+        let bz = std::slice::from_raw_parts(bz, bc);
+        let bsize = std::slice::from_raw_parts(bsize, bc);
+        
+        let v_out = std::slice::from_raw_parts_mut(v_out, res * res * res * 5 * 9);
+        let n_out = std::slice::from_raw_parts_mut(n_out, res * res * res * 5 * 9);
+        
+        let edges = &*std::ptr::addr_of!(EDGE_TABLE);
+        let tris = &*std::ptr::addr_of!(TRI_TABLE);
+
+        for z in 0..(res - 1) {
+        let z0 = axis[z]; let z1 = axis[z+1];
+        for y in 0..(res - 1) {
+            let y0 = axis[y]; let y1 = axis[y+1];
+            for x in 0..(res - 1) {
+                let x0 = axis[x]; let x1 = axis[x+1];
+                
+                let cv = [
+                    field[grid_index(x, y, z)], field[grid_index(x+1, y, z)],
+                    field[grid_index(x+1, y+1, z)], field[grid_index(x, y+1, z)],
+                    field[grid_index(x, y, z+1)], field[grid_index(x+1, y, z+1)],
+                    field[grid_index(x+1, y+1, z+1)], field[grid_index(x, y+1, z+1)],
+                ];
+
+                let mut ci = 0;
+                for i in 0..8 { if cv[i] < isolevel { ci |= 1 << i; } }
+                let em = edges[ci];
+                if em == 0 { continue; }
+
+                let cx = [x0, x1, x1, x0, x0, x1, x1, x0];
+                let cy = [y0, y0, y1, y1, y0, y0, y1, y1];
+                let cz = [z0, z0, z0, z0, z1, z1, z1, z1];
+
+                for e in 0..12 {
+                    if (em & (1 << e)) == 0 { continue; }
+                    let (ia, ib) = EDGE_VERTEX_INDICES[e];
+                    let (v_x, v_y, v_z) = rust_interpolate(cx[ia], cy[ia], cz[ia], cv[ia], cx[ib], cy[ib], cz[ib], cv[ib], isolevel);
+                    ex[e] = v_x; ey[e] = v_y; ez[e] = v_z;
+                    
+                    let (nx, ny, nz) = rust_sample_gradient(v_x, v_y, v_z, bx, by, bz, bsize, bc, eps, sub);
+                    enx[e] = nx; eny[e] = ny; enz[e] = nz;
+                }
+
+                let mut ti = ci * 16;
+                while tris[ti] != -1 {
+                    let e1 = tris[ti] as usize;
+                    let e2 = tris[ti+1] as usize;
+                    let e3 = tris[ti+2] as usize;
+
+                    v_out[o] = ex[e1]*2.0 - 1.0; v_out[o+1] = ey[e1]*2.0 - 1.0; v_out[o+2] = ez[e1]*2.0 - 1.0;
+                    v_out[o+3] = ex[e2]*2.0 - 1.0; v_out[o+4] = ey[e2]*2.0 - 1.0; v_out[o+5] = ez[e2]*2.0 - 1.0;
+                    v_out[o+6] = ex[e3]*2.0 - 1.0; v_out[o+7] = ey[e3]*2.0 - 1.0; v_out[o+8] = ez[e3]*2.0 - 1.0;
+
+                    n_out[o] = enx[e1]; n_out[o+1] = eny[e1]; n_out[o+2] = enz[e1];
+                    n_out[o+3] = enx[e2]; n_out[o+4] = eny[e2]; n_out[o+5] = enz[e2];
+                    n_out[o+6] = enx[e3]; n_out[o+7] = eny[e3]; n_out[o+8] = enz[e3];
+
+                    o += 9;
+                    ti += 3;
+                }
+            }
+        }
+    }
+    }
+    o as i32
+}
+
+#[inline(always)]
+unsafe fn rust_build_payload_impl(
+    v: *const f32, n: *const f32, vc: i32, dest: *mut f32
+) {
+    let vc = vc as usize;
+    unsafe {
+        *dest = vc as f32;
+        std::ptr::copy_nonoverlapping(v, dest.add(1), vc);
+        std::ptr::copy_nonoverlapping(n, dest.add(1 + vc), vc);
+    }
+}
+"""
+
 #=
 WGSL Compute Shader
 =#
@@ -389,6 +687,31 @@ end
 function build_payload!(v::Vector{Float32}, n::Vector{Float32}, vc::Int)
     @AX.call_rust_fn _rust_build_payload!(pointer(v), pointer(n), Int32(vc), pointer(PAYLOAD_BUFFER))
     return reinterpret(UInt8, @view PAYLOAD_BUFFER[1:(1 + vc * 2)])
+end
+
+# Global context for Native Generator
+const _NATIVE_CTX = Ref{NativeContext}()
+
+function get_native_generator()
+    # Populate the NativeContext struct with all pointers needed by the native stream.
+    _NATIVE_CTX[] = NativeContext(
+        0.0,
+        pointer(BLOB_X), pointer(BLOB_Y), pointer(BLOB_Z),
+        pointer(BLOB_VX), pointer(BLOB_VY), pointer(BLOB_VZ),
+        pointer(BLOB_SIZE), Int32(BALL_COUNT), SPEED_LIMIT,
+        pointer(FIELD_BUFFER), pointer(GRID_AXIS), Int32(GRID_RESOLUTION),
+        pointer(VERTEX_BUFFER), pointer(NORMAL_BUFFER), pointer(PAYLOAD_BUFFER),
+        pointer(_BLOB_DATA_BUF), ISOLEVEL, SUBTRACT, FIELD_EPSILON,
+        Csize_t(_BUF_FIELD), Csize_t(_BUF_BLOB_DATA), Csize_t(_PIPELINE_ID)
+    )
+    
+    ctx_ptr = Base.unsafe_convert(Ptr{Cvoid}, _NATIVE_CTX)
+    
+    # Get the raw Rust function pointer directly from the shared library
+    # The Rust function is: pub unsafe extern "C" fn _metaballs_native_frame(ctx: *mut (), out_len: *mut usize) -> *mut u8
+    cb_ptr = AX._axis_rs_symbol(Symbol("_metaballs_native_frame"))
+    
+    return cb_ptr, ctx_ptr
 end
 
 end # module MetaballsAX

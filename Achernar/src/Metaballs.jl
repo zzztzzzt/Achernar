@@ -12,10 +12,10 @@ export update_physics!, compute_field!, build_mesh!, build_payload!
 
 # Constants
 const BALL_COUNT = 12
-const FRAME_INTERVAL = 1 / 30
+const FRAME_INTERVAL = 1 / 120.0f0
 const SPEED_LIMIT = 0.008f0
 
-const GRID_RESOLUTION = 108
+const GRID_RESOLUTION = 132
 const GRID_SIZE = GRID_RESOLUTION * GRID_RESOLUTION * GRID_RESOLUTION
 const CUBE_COUNT = (GRID_RESOLUTION - 1) * (GRID_RESOLUTION - 1) * (GRID_RESOLUTION - 1)
 const MAX_TRIANGLES = CUBE_COUNT * 5

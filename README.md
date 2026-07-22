@@ -36,13 +36,7 @@ put below folders to project-root ( from Fomalhaut & Axis project ) :
 
 use below command to start it
 
-`julia`
-
-`] activate .`
-
-`instantiate`
-
-and hit Ctrl + D
+`julia` > `]` > `activate .` > `dev ./Axis` > `dev ./Fomalhaut` > `instantiate` > `Ctrl + D` exit REPL
 
 activate Julia-Rust FFI :
 
