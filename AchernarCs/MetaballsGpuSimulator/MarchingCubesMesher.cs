@@ -1,3 +1,5 @@
+// Manually Validated by zzztzzzt-SakuraAxis 2026-07-30
+
 using System.Runtime.CompilerServices;
 
 namespace AchernarCs;
@@ -231,7 +233,7 @@ public class MarchingCubesMesher
                         int e2 = MarchingCubesTables.TriTable[triTableBase + 1];
                         int e3 = MarchingCubesTables.TriTable[triTableBase + 2];
 
-                        localVerts[offset]     = edgeX[e1] * 2.0f - 1.0f;
+                        localVerts[offset] = edgeX[e1] * 2.0f - 1.0f;
                         localVerts[offset + 1] = edgeY[e1] * 2.0f - 1.0f;
                         localVerts[offset + 2] = edgeZ[e1] * 2.0f - 1.0f;
                         localVerts[offset + 3] = edgeX[e2] * 2.0f - 1.0f;
@@ -241,7 +243,7 @@ public class MarchingCubesMesher
                         localVerts[offset + 7] = edgeY[e3] * 2.0f - 1.0f;
                         localVerts[offset + 8] = edgeZ[e3] * 2.0f - 1.0f;
 
-                        localNorms[offset]     = edgeNx[e1];
+                        localNorms[offset] = edgeNx[e1];
                         localNorms[offset + 1] = edgeNy[e1];
                         localNorms[offset + 2] = edgeNz[e1];
                         localNorms[offset + 3] = edgeNx[e2];
