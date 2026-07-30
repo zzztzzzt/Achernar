@@ -81,6 +81,13 @@ public class MarchingCubesMesher
                 float y0 = _gridAxis[y];
                 float y1 = _gridAxis[y + 1];
 
+                // Edge cache along the x direction ( reset at the beginning of each column y )
+                bool havePrevE1 = false, havePrevE5 = false, havePrevE8 = false, havePrevE10 = false;
+                float prevE1x = 0, prevE1y = 0, prevE1z = 0, prevE1nx = 0, prevE1ny = 0, prevE1nz = 0;
+                float prevE5x = 0, prevE5y = 0, prevE5z = 0, prevE5nx = 0, prevE5ny = 0, prevE5nz = 0;
+                float prevE8x = 0, prevE8y = 0, prevE8z = 0, prevE8nx = 0, prevE8ny = 0, prevE8nz = 0;
+                float prevE10x = 0, prevE10y = 0, prevE10z = 0, prevE10nx = 0, prevE10ny = 0, prevE10nz = 0;
+
                 for (int x = 0; x < _gridResolution - 1; x++)
                 {
                     float x0 = _gridAxis[x];
@@ -114,7 +121,12 @@ public class MarchingCubesMesher
                     }
 
                     int edgeMask = MarchingCubesTables.EdgeTable[cubeIndex];
-                    if (edgeMask == 0) continue;
+                    if (edgeMask == 0)
+                    {
+                        // This cube has no intersections, so the next cube cannot use its right side
+                        havePrevE1 = havePrevE5 = havePrevE8 = havePrevE10 = false;
+                        continue;
+                    }
 
                     cubeX[0] = x0; cubeX[1] = x1; cubeX[2] = x1; cubeX[3] = x0;
                     cubeX[4] = x0; cubeX[5] = x1; cubeX[6] = x1; cubeX[7] = x0;
@@ -125,25 +137,91 @@ public class MarchingCubesMesher
                     cubeZ[0] = z0; cubeZ[1] = z0; cubeZ[2] = z0; cubeZ[3] = z0;
                     cubeZ[4] = z1; cubeZ[5] = z1; cubeZ[6] = z1; cubeZ[7] = z1;
 
+                    // Copy the cache of the previous cube to prevent reads and writes within the loop from interfering with each other
+                    // ( especially since a write to cube 10 will overwrite a read from cube 11 )
+                    bool activeE1 = havePrevE1;
+                    float e1x = prevE1x, e1y = prevE1y, e1z = prevE1z, e1nx = prevE1nx, e1ny = prevE1ny, e1nz = prevE1nz;
+                    bool activeE5 = havePrevE5;
+                    float e5x = prevE5x, e5y = prevE5y, e5z = prevE5z, e5nx = prevE5nx, e5ny = prevE5ny, e5nz = prevE5nz;
+                    bool activeE8 = havePrevE8;
+                    float e8x = prevE8x, e8y = prevE8y, e8z = prevE8z, e8nx = prevE8nx, e8ny = prevE8ny, e8nz = prevE8nz;
+                    bool activeE10 = havePrevE10;
+                    float e10x = prevE10x, e10y = prevE10y, e10z = prevE10z, e10nx = prevE10nx, e10ny = prevE10ny, e10nz = prevE10nz;
+
                     for (int edge = 0; edge < 12; edge++)
                     {
                         if ((edgeMask & (1 << edge)) == 0) continue;
 
-                        var (ia, ib) = EdgeVertexIndices[edge];
-                        var (vx, vy, vz) = InterpolateVertex(
-                            cubeX[ia], cubeY[ia], cubeZ[ia], cubeValues[ia],
-                            cubeX[ib], cubeY[ib], cubeZ[ib], cubeValues[ib]
-                        );
+                        float vx, vy, vz, nx, ny, nz;
+
+                        if (edge == 3 && activeE1)
+                        {
+                            vx = e1x; vy = e1y; vz = e1z;
+                            nx = e1nx; ny = e1ny; nz = e1nz;
+                        }
+                        else if (edge == 7 && activeE5)
+                        {
+                            vx = e5x; vy = e5y; vz = e5z;
+                            nx = e5nx; ny = e5ny; nz = e5nz;
+                        }
+                        else if (edge == 8 && activeE8)
+                        {
+                            vx = e8x; vy = e8y; vz = e8z;
+                            nx = e8nx; ny = e8ny; nz = e8nz;
+                        }
+                        else if (edge == 11 && activeE10)
+                        {
+                            vx = e10x; vy = e10y; vz = e10z;
+                            nx = e10nx; ny = e10ny; nz = e10nz;
+                        }
+                        else
+                        {
+                            var (ia, ib) = EdgeVertexIndices[edge];
+                            (vx, vy, vz) = InterpolateVertex(
+                                cubeX[ia], cubeY[ia], cubeZ[ia], cubeValues[ia],
+                                cubeX[ib], cubeY[ib], cubeZ[ib], cubeValues[ib]
+                            );
+                            (nx, ny, nz) = SampleGradient(vx, vy, vz);
+                        }
 
                         edgeX[edge] = vx;
                         edgeY[edge] = vy;
                         edgeZ[edge] = vz;
-
-                        var (nx, ny, nz) = SampleGradient(vx, vy, vz);
                         edgeNx[edge] = nx;
                         edgeNy[edge] = ny;
                         edgeNz[edge] = nz;
+
+                        if (edge == 1)
+                        {
+                            prevE1x = vx; prevE1y = vy; prevE1z = vz;
+                            prevE1nx = nx; prevE1ny = ny; prevE1nz = nz;
+                            havePrevE1 = true;
+                        }
+                        else if (edge == 5)
+                        {
+                            prevE5x = vx; prevE5y = vy; prevE5z = vz;
+                            prevE5nx = nx; prevE5ny = ny; prevE5nz = nz;
+                            havePrevE5 = true;
+                        }
+                        else if (edge == 9)
+                        {
+                            prevE8x = vx; prevE8y = vy; prevE8z = vz;
+                            prevE8nx = nx; prevE8ny = ny; prevE8nz = nz;
+                            havePrevE8 = true;
+                        }
+                        else if (edge == 10)
+                        {
+                            prevE10x = vx; prevE10y = vy; prevE10z = vz;
+                            prevE10nx = nx; prevE10ny = ny; prevE10nz = nz;
+                            havePrevE10 = true;
+                        }
                     }
+
+                    // If this cube does not generate edges 1/5/9/10, the next cube cannot use it ( cache invalidation )
+                    if ((edgeMask & (1 << 1)) == 0) havePrevE1 = false;
+                    if ((edgeMask & (1 << 5)) == 0) havePrevE5 = false;
+                    if ((edgeMask & (1 << 9)) == 0) havePrevE8 = false;
+                    if ((edgeMask & (1 << 10)) == 0) havePrevE10 = false;
 
                     int triTableBase = cubeIndex * 16;
                     while (MarchingCubesTables.TriTable[triTableBase] != -1)
@@ -153,7 +231,6 @@ public class MarchingCubesMesher
                         int e2 = MarchingCubesTables.TriTable[triTableBase + 1];
                         int e3 = MarchingCubesTables.TriTable[triTableBase + 2];
 
-                        // Vertices (scaled to -1..1)
                         localVerts[offset]     = edgeX[e1] * 2.0f - 1.0f;
                         localVerts[offset + 1] = edgeY[e1] * 2.0f - 1.0f;
                         localVerts[offset + 2] = edgeZ[e1] * 2.0f - 1.0f;
@@ -164,7 +241,6 @@ public class MarchingCubesMesher
                         localVerts[offset + 7] = edgeY[e3] * 2.0f - 1.0f;
                         localVerts[offset + 8] = edgeZ[e3] * 2.0f - 1.0f;
 
-                        // Normals
                         localNorms[offset]     = edgeNx[e1];
                         localNorms[offset + 1] = edgeNy[e1];
                         localNorms[offset + 2] = edgeNz[e1];
