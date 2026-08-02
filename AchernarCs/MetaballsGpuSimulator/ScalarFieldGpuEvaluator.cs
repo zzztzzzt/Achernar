@@ -7,6 +7,7 @@ public class ScalarFieldGpuEvaluator : IDisposable
     public const float FieldEpsilon = 1.0e-6f;
     public const float Subtract = 8.0f;
 
+    private readonly GraphicsDevice _device;
     private readonly int _gridResolution;
     private readonly int _blobCount;
     private readonly float[] _fieldBuffer;
@@ -19,19 +20,30 @@ public class ScalarFieldGpuEvaluator : IDisposable
 
     public ScalarFieldGpuEvaluator(int gridResolution, int blobCount, float[] gridAxis)
     {
+        _device = GraphicsDevice.GetDefault();
+
         _gridResolution = gridResolution;
         _blobCount = blobCount;
 
         int gridSize = gridResolution * gridResolution * gridResolution;
         _fieldBuffer = new float[gridSize];
 
-        _dField = GraphicsDevice.GetDefault().AllocateReadWriteBuffer<float>(gridSize);
-        _dAxis = GraphicsDevice.GetDefault().AllocateReadOnlyBuffer(gridAxis);
-        _dBlobs = GraphicsDevice.GetDefault().AllocateReadOnlyBuffer<Float4>(blobCount);
+        _dField = _device.AllocateReadWriteBuffer<float>(gridSize);
+        _dAxis = _device.AllocateReadOnlyBuffer(gridAxis);
+        _dBlobs = _device.AllocateReadOnlyBuffer<Float4>(blobCount);
     }
 
     public float[] Compute(Float4[] blobGpuData)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (blobGpuData.Length != _blobCount)
+        {
+            throw new ArgumentException(
+                $"Expected {_blobCount} blobs, got {blobGpuData.Length}.",
+                nameof(blobGpuData));
+        }
+
         _dBlobs.CopyFrom(blobGpuData);
 
         var shader = new FieldKernel(
@@ -44,7 +56,7 @@ public class ScalarFieldGpuEvaluator : IDisposable
             Subtract
         );
 
-        GraphicsDevice.GetDefault().For(_gridResolution, _gridResolution, _gridResolution, shader);
+        _device.For(_gridResolution, _gridResolution, _gridResolution, shader);
         _dField.CopyTo(_fieldBuffer);
 
         return _fieldBuffer;
