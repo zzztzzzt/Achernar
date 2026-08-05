@@ -1,3 +1,5 @@
+// Manually Validated by zzztzzzt-SakuraAxis 2026-08-05
+
 using ComputeSharp;
 
 namespace AchernarCs;
