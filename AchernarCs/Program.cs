@@ -56,7 +56,7 @@ app.Map("/metaballs", async context =>
     if (context.WebSockets.IsWebSocketRequest)
     {
         using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
-        var simulator = new MetaballsGpuSimulator();
+        using var simulator = new MetaballsGpuSimulator();
         var cancellationToken = context.RequestAborted;
 
         try
